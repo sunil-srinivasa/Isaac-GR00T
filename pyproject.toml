@@ -98,9 +98,9 @@ orin = [
 ]
 thor = [
     # Thor-specific versions and packages
-    "pytorch3d==0.7.8",
+    # "pytorch3d==0.7.8",
     "tensorflow==2.18.0",
-    "diffusers==0.36.0.dev0",
+    # "diffusers==0.36.0.dev0",
     "opencv_python==4.11.0.86",
     "iopath==0.1.9",
     "pyzmq",

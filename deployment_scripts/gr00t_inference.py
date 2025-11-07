@@ -17,6 +17,9 @@ import argparse
 import os
 from functools import partial
 
+import csv
+import time
+
 import torch
 from action_head_utils import action_head_pytorch_forward
 from trt_model_forward import setup_tensorrt_engines
@@ -25,6 +28,69 @@ import gr00t
 from gr00t.data.dataset import LeRobotSingleDataset
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
 from gr00t.model.policy import Gr00tPolicy
+
+
+def run_inference(policy, dataset, mode, num_steps=100, capture_nsys=False, log_to_csv=False):
+    """Run inference on multiple samples and log timing stats."""
+    N = min(len(dataset), num_steps)
+    inference_times = torch.zeros(N, dtype=torch.float32)
+
+    print(f"\nRunning {mode} inference on {N} samples...\n")
+
+    if capture_nsys:
+        nsys_start = N // 2
+        num_nsys_steps = 5
+        nsys_end = nsys_start + num_nsys_steps
+    #     nsys_prefix = "nsys profile -s none -t cuda,nvtx -f true -c cudaProfilerApi --capture-range-end=\"repeat[]\" \
+    #     --cuda-graph-trace=node --cuda-event-trace=false --cpuctxsw=none --cuda-flush-interval=10000 --gpu-metrics-frequency 50000"
+
+    for i in range(N):
+        step_data = dataset[i]
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start = time.time()
+
+        # Wrap the inference call with NVTX if profiling is enabled
+        if capture_nsys and nsys_start <= i < nsys_end:
+            print("Capturing nsys...")
+            with torch.cuda.nvtx.range("policy_inference"):
+                predicted_action = policy.get_action(step_data)
+        else:
+            predicted_action = policy.get_action(step_data)        
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        end = time.time()
+
+        inference_times[i] = end - start
+
+        print(f"Sample {i+1}/{N} | Inference time: {end - start:.4f}s")
+
+        if i == 0:
+            print(f"\n=== {mode.capitalize()} Inference Results (Sample 1) ===")
+            for key, value in predicted_action.items():
+                print(f"{key}: {value.shape}")
+
+    # Compute timing stats
+    avg_time = torch.mean(inference_times).item()
+    std_time = torch.std(inference_times).item()
+    throughput = 1.0 / avg_time if avg_time > 0 else 0.0
+
+    print(f"\n--- Summary ({mode}) ---")
+    print(f"Average inference time: {avg_time:.4f}s ± {std_time:.4f}s")
+    print(f"Throughput: {throughput:.2f} samples/sec")
+
+    if log_to_csv:
+        filename = f"inference_times_{mode}.csv"
+        with open(filename, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["sample_index", "inference_time_s"])
+            for i, t in enumerate(inference_times):
+                writer.writerow([i, float(t)])
+        print(f"Saved timing log to {filename}")
+
+    return inference_times
 
 
 def compare_predictions(pred_tensorrt, pred_torch):
@@ -154,6 +220,7 @@ if __name__ == "__main__":
         print("\n=== PyTorch Inference Results ===")
         for key, value in predicted_action.items():
             print(key, value.shape)
+        run_inference(policy, dataset, "pytorch", capture_nsys=True)
 
     elif args.inference_mode == "tensorrt":
         # Setup TensorRT engines
@@ -163,6 +230,8 @@ if __name__ == "__main__":
         print("\n=== TensorRT Inference Results ===")
         for key, value in predicted_action.items():
             print(key, value.shape)
+
+        run_inference(policy, dataset, "tensorrt", capture_nsys=True)
 
     else:
         # ensure PyTorch and TensorRT have the same init_actions
